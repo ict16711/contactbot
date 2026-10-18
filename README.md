@@ -26,6 +26,8 @@ Users select **Contact Admin** and can send text, photos, videos, PDFs, document
 
 Topic buttons let authorized admins claim, transfer, prioritize, mute reminders, close, or reopen conversations. Topic status, assigned admin, last responder, unread count, and priority are reflected in MongoDB and the topic control card. Statuses are New, In Progress, Waiting, and Resolved. Unanswered topics receive periodic reminders unless muted. Set `AUTO_CLOSE_AFTER_SECONDS` to a positive number to close inactive topics; zero disables auto-close. `REMINDER_INTERVAL_SECONDS` defaults to one hour.
 
+Edit bot response copy, support-flow captions, message/media type detection, duplicate fingerprints, payload extraction, and status-card text in `message.py`. `bot.py` keeps the routing and command logic; `keyboards.py` keeps button labels and layouts.
+
 ## Admin commands
 
 - `/admin` opens the dashboard.

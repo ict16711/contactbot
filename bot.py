@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import logging
 import re
 from datetime import datetime, timedelta
@@ -29,6 +28,26 @@ from config import (
     SUPPORT_GROUP_ID,
 )
 from database import Database, utcnow
+from message import (
+    blocked_user_caption,
+    contact_confirmation_caption,
+    contact_cooldown_caption,
+    contact_delivery_error_caption,
+    contact_duplicate_caption,
+    contact_prompt_caption,
+    contact_topic_duplicate_caption,
+    contact_unavailable_caption,
+    file_id as message_file_id,
+    fingerprint as message_fingerprint,
+    payload as message_payload,
+    render,
+    reminder_caption,
+    reply_delivery_error_caption,
+    reply_unavailable_caption,
+    setup_required_caption,
+    text_or_caption,
+    welcome_caption,
+)
 from keyboards import (
     admin_dashboard,
     ticket_actions,
@@ -130,7 +149,7 @@ async def admin_permissions(admin_id: int) -> set[str]:
 async def require_admin(message: Message, permission: str) -> bool:
     permissions = await admin_permissions(message.from_user.id)
     if "*" not in permissions and permission not in permissions:
-        await message.answer("You are not authorized to use this command.")
+        await message.answer(render("unauthorized_command"))
         return False
     return True
 
@@ -138,7 +157,7 @@ async def require_admin(message: Message, permission: str) -> bool:
 async def require_callback_admin(callback: CallbackQuery, permission: str) -> bool:
     permissions = await admin_permissions(callback.from_user.id)
     if "*" not in permissions and permission not in permissions:
-        await callback.answer("You are not authorized to do that.", show_alert=True)
+        await callback.answer(render("unauthorized_action"), show_alert=True)
         return False
     return True
 
@@ -147,10 +166,18 @@ async def send_user_page(message: Message, page: int) -> None:
     page = max(0, page)
     cursor = db.users.find().sort("joined_at", -1).skip(page * 10).limit(11)
     users = await cursor.to_list(length=11)
-    lines = ["Registered users:"]
+    lines = [render("user_list_title")]
     for user in users[:10]:
         username = f"@{user['username']}" if user.get("username") else "no username"
-        lines.append(f"{user['user_id']} | {user.get('first_name') or 'Unknown'} | {username} | {user.get('status', 'active')}")
+        lines.append(
+            render(
+                "user_list_entry",
+                user_id=user["user_id"],
+                name=user.get("first_name") or "Unknown",
+                username=username,
+                status=user.get("status", "active"),
+            )
+        )
     await message.answer("\n".join(lines), reply_markup=user_pagination(page, len(users) > 10))
 
 
@@ -170,24 +197,7 @@ async def perform_broadcast(admin_id: int, source_chat_id: int, source_message_i
     await db.broadcasts.insert_one(
         {"admin_id": admin_id, "created_at": utcnow(), "delivered": delivered, "failed": failed}
     )
-    await status_message.edit_text(f"Broadcast complete. Delivered: {delivered}; failed: {failed}.")
-
-
-def message_file_id(message: Message) -> str | None:
-    if message.photo:
-        return message.photo[-1].file_id
-    for field in ("video", "document", "voice", "audio", "animation", "video_note", "sticker"):
-        media = getattr(message, field, None)
-        if media:
-            return media.file_id
-    return None
-
-
-def message_fingerprint(message: Message) -> str:
-    value = "\0".join(
-        (message.content_type, message.text or message.caption or "", message_file_id(message) or "")
-    )
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    await status_message.edit_text(render("broadcast_confirmed", delivered=delivered, failed=failed))
 
 
 async def create_user_topic(
@@ -254,7 +264,7 @@ async def create_user_topic(
 async def ensure_user_topic(user) -> dict:
     group_id = await db.get_support_group_id()
     if not group_id:
-        raise RuntimeError("Support inbox is not configured. Ask an owner to run /setup in the support supergroup.")
+        raise RuntimeError(setup_required_caption())
     topic = await db.get_support_topic(user.id)
     force_recreate = False
     if topic and topic.get("support_group_id") == group_id:
@@ -296,11 +306,13 @@ async def refresh_topic_control(topic: dict) -> None:
     assigned = topic.get("assigned_admin")
     admin = await db.admins.find_one({"admin_id": assigned}) if assigned else None
     last_admin = await db.admins.find_one({"admin_id": topic.get("last_admin_id")}) if topic.get("last_admin_id") else None
-    text = (
-        f"{name}\n"
-        f"Assigned: {admin.get('name', assigned) if admin else 'Unassigned'}\n"
-        f"Unread: {topic.get('unread_count', 0)} | Awaiting admin: {'yes' if topic.get('awaiting_admin') else 'no'}\n"
-        f"Last reply: {last_admin.get('name', topic['last_admin_id']) if last_admin else 'none'}"
+    text = render(
+        "topic_control",
+        name=name,
+        assigned=admin.get("name", assigned) if admin else "Unassigned",
+        unread=topic.get("unread_count", 0),
+        awaiting="yes" if topic.get("awaiting_admin") else "no",
+        last_reply=last_admin.get("name", topic["last_admin_id"]) if last_admin else "none",
     )
     markup = topic_actions(topic["user_id"], status, topic.get("muted", False))
     control_id = topic.get("control_message_id")
@@ -341,20 +353,20 @@ def topic_reply_parameters(mapping: dict | None) -> ReplyParameters | None:
 async def setup_support_group(message: Message) -> None:
     permissions = await admin_permissions(message.from_user.id)
     if "*" not in permissions and "admin_management" not in permissions:
-        await message.answer("Only an authorized owner can configure the support inbox.")
+        await message.answer(render("setup_owner_only"))
         return
     chat = await bot.get_chat(message.chat.id)
     if not chat.is_forum:
-        await message.answer("Enable Topics for this supergroup before running /setup.")
+        await message.answer(render("setup_topics_required"))
         return
     bot_user = await bot.get_me()
     bot_member = await bot.get_chat_member(message.chat.id, bot_user.id)
     if bot_member.status != "administrator" or not getattr(bot_member, "can_manage_topics", False):
-        await message.answer("Make the bot an administrator with Manage Topics permission, then run /setup again.")
+        await message.answer(render("setup_bot_permissions"))
         return
     await db.set_support_group(message.chat.id, chat.title or "Support Inbox")
     await db.log_support_event("support_group_setup", group_id=message.chat.id, owner_id=message.from_user.id)
-    await message.answer("Support inbox configured. New user conversations will get their own topic here.")
+    await message.answer(render("setup_complete"))
 
 
 @group_router.message(
@@ -378,9 +390,7 @@ async def route_admin_topic_message(message: Message) -> None:
         "source_message_id": message.message_id,
         "support_group_id": message.chat.id,
         "thread_id": message.message_thread_id,
-        "media_type": message.content_type,
-        "text": message.text or message.caption,
-        "file_id": message_file_id(message),
+        **message_payload(message),
         "created_at": utcnow(),
     }
     if not await db.reserve_support_message(record):
@@ -403,7 +413,7 @@ async def route_admin_topic_message(message: Message) -> None:
             admin_id=message.from_user.id,
             error=str(error),
         )
-        await message.reply("Could not deliver that reply to the user.")
+        await message.reply(reply_delivery_error_caption())
         return
     await db.finish_support_message(
         message.chat.id,
@@ -425,7 +435,7 @@ async def inbox_action_callback(callback: CallbackQuery) -> None:
     user_id = int(parts[2])
     topic = await db.get_support_topic(user_id)
     if not topic or topic["support_group_id"] != callback.message.chat.id:
-        await callback.answer("Conversation not found", show_alert=True)
+        await callback.answer(render("conversation_not_found"), show_alert=True)
         return
 
     if action == "claim":
@@ -437,11 +447,11 @@ async def inbox_action_callback(callback: CallbackQuery) -> None:
     elif action == "transfer":
         admins = await db.admins.find({"admin_id": {"$ne": callback.from_user.id}}).to_list(length=100)
         if not admins:
-            await callback.answer("No other admins are available", show_alert=True)
+            await callback.answer(render("admins_unavailable"), show_alert=True)
             return
         await bot.send_message(
             topic["support_group_id"],
-            "Choose an admin to assign this conversation:",
+            render("choose_admin"),
             reply_markup=transfer_admins(user_id, admins),
             message_thread_id=topic["thread_id"],
         )
@@ -451,7 +461,7 @@ async def inbox_action_callback(callback: CallbackQuery) -> None:
         admin_id = int(parts[3])
         admin = await db.admins.find_one({"admin_id": admin_id})
         if not admin:
-            await callback.answer("That admin is no longer authorized", show_alert=True)
+            await callback.answer(render("admin_no_longer_authorized"), show_alert=True)
             return
         topic = await db.update_support_topic(
             user_id,
@@ -466,7 +476,7 @@ async def inbox_action_callback(callback: CallbackQuery) -> None:
     elif action == "priority":
         await bot.send_message(
             topic["support_group_id"],
-            "Choose priority:",
+            render("choose_priority"),
             reply_markup=priority_options(user_id),
             message_thread_id=topic["thread_id"],
         )
@@ -475,7 +485,7 @@ async def inbox_action_callback(callback: CallbackQuery) -> None:
     elif action == "setpriority":
         priority = parts[3]
         if priority not in {"normal", "high", "urgent"}:
-            await callback.answer("Invalid priority", show_alert=True)
+            await callback.answer(render("invalid_priority"), show_alert=True)
             return
         topic = await db.update_support_topic(user_id, {"priority": priority})
         await db.log_support_event("priority_changed", user_id=user_id, admin_id=callback.from_user.id, priority=priority)
@@ -502,7 +512,7 @@ async def inbox_action_callback(callback: CallbackQuery) -> None:
                 user = await bot.get_chat(user_id)
                 topic = await create_user_topic(user, topic["support_group_id"], topic, force=True)
             else:
-                await callback.answer("Could not reopen the topic", show_alert=True)
+                await callback.answer(render("topic_reopen_failed"), show_alert=True)
                 return
         topic = await db.update_support_topic(
             user_id,
@@ -510,26 +520,23 @@ async def inbox_action_callback(callback: CallbackQuery) -> None:
             unset_fields=["archived_at"],
         )
     else:
-        await callback.answer("Unknown action", show_alert=True)
+        await callback.answer(render("unknown_inbox_action"), show_alert=True)
         return
 
     if topic:
         await refresh_topic_control(topic)
-    await callback.answer("Conversation updated")
+    await callback.answer(render("inbox_action_done"))
 
 
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext) -> None:
     user = await db.save_user(message.from_user)
     if user.get("status") == "banned":
-        await message.answer("You cannot use this bot.")
+        await message.answer(blocked_user_caption())
         return
     await state.clear()
     settings = await db.settings.find_one({"_id": "bot"}) or {}
-    await message.answer(
-        settings.get("welcome_text", f"Welcome to {BOT_NAME}. Select Contact Admin when you are ready to send a message."),
-        reply_markup=user_menu(),
-    )
+    await message.answer(settings.get("welcome_text", welcome_caption(BOT_NAME)), reply_markup=user_menu())
 
 
 @router.message(Command("admin"))
@@ -537,37 +544,37 @@ async def admin_command(message: Message, state: FSMContext) -> None:
     if not await require_admin(message, "tickets"):
         return
     await state.clear()
-    await message.answer("Admin dashboard", reply_markup=admin_dashboard())
+    await message.answer(render("admin_dashboard"), reply_markup=admin_dashboard())
 
 
 @router.message(F.text == "Contact Admin")
 async def begin_contact(message: Message, state: FSMContext) -> None:
     user = await db.save_user(message.from_user)
     if user.get("status") == "banned":
-        await message.answer("You cannot use this bot.")
+        await message.answer(blocked_user_caption())
         return
     await state.set_state(ContactFlow.active)
-    await message.answer("Send your message, photo, document, or voice note. Use /cancel to stop.")
+    await message.answer(contact_prompt_caption())
 
 
 @router.message(Command("cancel"))
 async def cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer("Cancelled.", reply_markup=user_menu())
+    await message.answer(render("cancelled"), reply_markup=user_menu())
 
 
 @router.message(lambda message: not (message.text and message.text.startswith("/")))
 async def receive_contact(message: Message) -> None:
     user = await db.save_user(message.from_user)
     if user.get("status") == "banned":
-        await message.answer("You cannot use this bot.")
+        await message.answer(blocked_user_caption())
         return
     result = await db.check_message_allowed(message.from_user.id, message_fingerprint(message))
     if result == "duplicate":
-        await message.answer("That message was already received. Please wait for an admin reply.")
+        await message.answer(contact_duplicate_caption())
         return
     if result == "cooldown":
-        await message.answer("Please wait a few seconds before sending another message.")
+        await message.answer(contact_cooldown_caption())
         return
     try:
         topic = await ensure_user_topic(message.from_user)
@@ -581,13 +588,11 @@ async def receive_contact(message: Message) -> None:
         "source_message_id": message.message_id,
         "support_group_id": topic["support_group_id"],
         "thread_id": topic["thread_id"],
-        "media_type": message.content_type,
-        "text": message.text or message.caption,
-        "file_id": message_file_id(message),
+        **message_payload(message),
         "created_at": utcnow(),
     }
     if not await db.reserve_support_message(record):
-        await message.answer(f"Message already received in support topic {topic['thread_id']}.")
+        await message.answer(contact_topic_duplicate_caption(topic["thread_id"]))
         return
     reply_mapping = None
     if message.reply_to_message:
@@ -605,7 +610,7 @@ async def receive_contact(message: Message) -> None:
             await db.fail_support_message(message.chat.id, message.message_id, str(error))
             await db.release_failed_message_attempt(message.from_user.id, message_fingerprint(message))
             await db.log_support_event("user_message_delivery_failed", user_id=message.from_user.id, error=str(error))
-            await message.answer("I could not deliver that message to support. Please try again.")
+            await message.answer(contact_delivery_error_caption())
             return
         try:
             if "closed" in str(error).lower():
@@ -623,13 +628,13 @@ async def receive_contact(message: Message) -> None:
         except Exception as retry_error:
             await db.fail_support_message(message.chat.id, message.message_id, str(retry_error))
             await db.release_failed_message_attempt(message.from_user.id, message_fingerprint(message))
-            await message.answer("I could not reach the support inbox. Please try again later.")
+            await message.answer(contact_unavailable_caption())
             return
     except (TelegramNetworkError, TelegramServerError, TelegramForbiddenError, TelegramRetryAfter) as error:
         await db.fail_support_message(message.chat.id, message.message_id, str(error))
         await db.release_failed_message_attempt(message.from_user.id, message_fingerprint(message))
         await db.log_support_event("user_message_delivery_failed", user_id=message.from_user.id, error=str(error))
-        await message.answer("I could not reach the support inbox. Please try again later.")
+        await message.answer(contact_unavailable_caption())
         return
 
     await db.finish_support_message(
@@ -641,7 +646,7 @@ async def receive_contact(message: Message) -> None:
     )
     topic = await db.note_topic_user_message(message.from_user.id) or topic
     await refresh_topic_control(topic)
-    await message.answer(f"Your message was sent to support. Topic ID: {topic['thread_id']}.")
+    await message.answer(contact_confirmation_caption(topic["thread_id"]))
 
 
 @router.message(Command("reply"))
@@ -650,18 +655,18 @@ async def reply_command(message: Message, state: FSMContext) -> None:
         return
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) < 2:
-        await message.answer("Usage: /reply TICKET_ID [message]")
+        await message.answer(render("reply_usage"))
         return
     ticket = await db.tickets.find_one({"ticket_id": parts[1].upper()})
     if not ticket:
-        await message.answer("Ticket not found.")
+        await message.answer(render("ticket_not_found"))
         return
     if len(parts) == 3:
         await deliver_reply(message, ticket, parts[2])
         return
     await state.set_state(ReplyFlow.waiting_message)
     await state.update_data(ticket_id=ticket["ticket_id"])
-    await message.answer(f"Send your reply for {ticket['ticket_id']} now. Text and media are supported; /cancel stops.")
+    await message.answer(render("reply_prompt", ticket_id=ticket["ticket_id"]))
 
 
 async def deliver_reply(message: Message, ticket: dict, source: Message | str) -> None:
@@ -677,9 +682,10 @@ async def deliver_reply(message: Message, ticket: dict, source: Message | str) -
     else:
         source_chat_id = source.chat.id
         source_message_id = source.message_id
-        text = source.text or source.caption
-        content_type = source.content_type
-        file_id = message_file_id(source)
+        source_payload = message_payload(source)
+        text = source_payload["text"]
+        content_type = source_payload["media_type"]
+        file_id = source_payload["file_id"]
         sent = await bot.copy_message(ticket["user_id"], source_chat_id, source_message_id)
         message_id = sent.message_id
         chat_id = ticket["user_id"]
@@ -694,7 +700,7 @@ async def deliver_reply(message: Message, ticket: dict, source: Message | str) -
         content_type,
         file_id,
     )
-    await message.answer(f"Reply sent to ticket {ticket['ticket_id']}.")
+    await message.answer(render("reply_sent", ticket_id=ticket["ticket_id"]))
 
 
 @router.message(ReplyFlow.waiting_message)
@@ -703,12 +709,12 @@ async def receive_reply(message: Message, state: FSMContext) -> None:
     ticket = await db.tickets.find_one({"ticket_id": data.get("ticket_id")})
     await state.clear()
     if not ticket:
-        await message.answer("Ticket not found.")
+        await message.answer(render("ticket_not_found"))
         return
     try:
         await deliver_reply(message, ticket, message)
     except (TelegramForbiddenError, TelegramBadRequest):
-        await message.answer("Could not deliver the reply. The user may have blocked the bot.")
+        await message.answer(reply_unavailable_caption())
 
 
 @router.message(F.reply_to_message)
@@ -726,12 +732,12 @@ async def direct_ticket_reply(message: Message) -> None:
         }
     )
     if not ticket:
-        await message.answer("Reply to a copied user message to respond to its ticket.")
+        await message.answer(render("direct_reply_prompt"))
         return
     try:
         await deliver_reply(message, ticket, message)
     except (TelegramForbiddenError, TelegramBadRequest):
-        await message.answer("Could not deliver the reply. The user may have blocked the bot.")
+        await message.answer(reply_unavailable_caption())
 
 
 @router.message(Command("users"))
@@ -753,14 +759,14 @@ async def search_command(message: Message, state: FSMContext) -> None:
     query = (message.text or "").partition(" ")[2].strip()
     if not query:
         await state.set_state(SearchFlow.waiting_query)
-        await message.answer("Send a Telegram ID, username, ticket ID, or search term.")
+        await message.answer(render("search_prompt"))
         return
     await run_search(message, query)
 
 
 async def run_search(message: Message, query: str) -> None:
     if not query.strip():
-        await message.answer("Send a search term, Telegram ID, username, or ticket ID.")
+        await message.answer(render("search_empty_prompt"))
         return
     ticket = await db.tickets.find_one({"ticket_id": query.upper()})
     if not ticket:
@@ -769,8 +775,14 @@ async def run_search(message: Message, query: str) -> None:
         )
     if ticket:
         await message.answer(
-            f"Ticket {ticket['ticket_id']} | user {ticket['user_id']} | {ticket['status']} | "
-            f"queries {ticket['query_count']} | replies {ticket['response_count']}",
+            render(
+                "ticket_summary",
+                ticket_id=ticket["ticket_id"],
+                user_id=ticket["user_id"],
+                status=ticket["status"],
+                queries=ticket["query_count"],
+                responses=ticket["response_count"],
+            ),
             reply_markup=ticket_actions(ticket["ticket_id"]),
         )
         return
@@ -783,33 +795,38 @@ async def run_search(message: Message, query: str) -> None:
         filters.insert(0, {"user_id": int(query)})
     matches = await db.users.find({"$or": filters}).limit(10).to_list(length=10)
     if not matches:
-        await message.answer("No matching user or ticket.")
+        await message.answer(render("search_no_results"))
         return
     lines = [
-        f"{item['user_id']} | {item.get('first_name') or 'Unknown'} | "
-        f"{'@' + item['username'] if item.get('username') else 'no username'} | {item.get('status', 'active')}"
+        render(
+            "search_user_entry",
+            user_id=item["user_id"],
+            name=item.get("first_name") or "Unknown",
+            username=f"@{item['username']}" if item.get("username") else "no username",
+            status=item.get("status", "active"),
+        )
         for item in matches
     ]
-    await message.answer("Matches:\n" + "\n".join(lines))
+    await message.answer(render("search_matches", lines="\n".join(lines)))
 
 
 @router.message(SearchFlow.waiting_query)
 async def receive_search(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await run_search(message, message.text or message.caption or "")
+    await run_search(message, text_or_caption(message) or "")
 
 
 async def set_user_status(message: Message, status: str, command: str) -> None:
     parts = (message.text or "").split(maxsplit=1)
     if len(parts) != 2 or not parts[1].isdigit():
-        await message.answer(f"Usage: /{command} TELEGRAM_ID")
+        await message.answer(render("ban_usage", command=command))
         return
     user_id = int(parts[1])
     result = await db.users.update_one({"user_id": user_id}, {"$set": {"status": status}})
     if result.matched_count:
-        await message.answer(f"User {user_id} is now {status}.")
+        await message.answer(render("user_status_changed", user_id=user_id, status=status))
     else:
-        await message.answer("User not found. They must start the bot first.")
+        await message.answer(render("user_not_found"))
 
 
 @router.message(Command("ban"))
@@ -832,10 +849,19 @@ async def stats_command(message: Message) -> None:
     tickets = stats["tickets"]
     statuses = stats["statuses"]
     await message.answer(
-        f"Users: {stats['users']} ({stats['active_users']} active, {stats['banned_users']} banned)\n"
-        f"Tickets: {tickets['tickets']} ({statuses.get('open', 0)} open, {statuses.get('pending', 0)} pending, {statuses.get('resolved', 0)} resolved)\n"
-        f"Queries: {tickets.get('queries', 0)} | Replies: {tickets.get('responses', 0)}\n"
-        f"Broadcasts: {stats['broadcasts']}"
+        render(
+            "stats",
+            users=stats["users"],
+            active_users=stats["active_users"],
+            banned_users=stats["banned_users"],
+            ticket_count=tickets["tickets"],
+            open_count=statuses.get("open", 0),
+            pending_count=statuses.get("pending", 0),
+            resolved_count=statuses.get("resolved", 0),
+            queries=tickets.get("queries", 0),
+            responses=tickets.get("responses", 0),
+            broadcasts=stats["broadcasts"],
+        )
     )
 
 
@@ -851,8 +877,18 @@ async def admins_command(message: Message) -> None:
         for item in admins:
             username = f" (@{item['username']})" if item.get("username") else ""
             permissions = ", ".join(item.get("permissions", []))
-            lines.append(f"{item['admin_id']} | {item.get('name', 'Admin')}{username} | {permissions}")
-        await message.answer("Authorized admins:\n" + ("\n".join(lines) if lines else "None"))
+            lines.append(
+                render(
+                    "admin_list_entry",
+                    admin_id=item["admin_id"],
+                    name=item.get("name", "Admin"),
+                    username=username,
+                    permissions=permissions,
+                )
+            )
+        await message.answer(
+            render("admins_title") + "\n" + ("\n".join(lines) if lines else render("admins_empty"))
+        )
     elif action == "add" and len(parts) >= 3 and parts[2].isdigit():
         admin_id = int(parts[2])
         permissions = parts[3].split(",") if len(parts) > 3 else ["reply", "tickets", "users", "broadcast", "stats"]
@@ -870,16 +906,16 @@ async def admins_command(message: Message) -> None:
             {"$set": profile, "$setOnInsert": {"created_at": utcnow()}},
             upsert=True,
         )
-        await message.answer(f"Admin {admin_id} saved with permissions: {', '.join(permissions)}")
+        await message.answer(render("admin_saved", admin_id=admin_id, permissions=", ".join(permissions)))
     elif action == "remove" and len(parts) == 3 and parts[2].isdigit():
         admin_id = int(parts[2])
         if admin_id in ADMIN_IDS:
-            await message.answer("Bootstrap admins cannot be removed here; update ADMIN_IDS instead.")
+            await message.answer(render("bootstrap_admin_locked"))
             return
         await db.admins.delete_one({"admin_id": admin_id})
-        await message.answer(f"Admin {admin_id} removed.")
+        await message.answer(render("admin_removed", admin_id=admin_id))
     else:
-        await message.answer("Usage: /admins [list|add TELEGRAM_ID [permission,...]|remove TELEGRAM_ID]")
+        await message.answer(render("admins_usage"))
 
 
 @router.message(Command("quickreplies"))
@@ -891,22 +927,26 @@ async def quick_replies_command(message: Message) -> None:
     settings = await db.settings.find_one({"_id": "bot"}) or {}
     quick_replies = settings.get("quick_replies", [])
     if action == "list":
-        lines = [f"{index + 1}. {text}" for index, text in enumerate(quick_replies)]
-        await message.answer("Quick replies:\n" + ("\n".join(lines) if lines else "None configured."))
+        lines = [render("quick_reply_entry", number=index + 1, text=text) for index, text in enumerate(quick_replies)]
+        await message.answer(
+            render("quick_replies_title")
+            + "\n"
+            + ("\n".join(lines) if lines else render("quick_replies_empty"))
+        )
     elif action == "add" and len(parts) == 3:
         quick_replies.append(parts[2])
         await db.settings.update_one({"_id": "bot"}, {"$set": {"quick_replies": quick_replies}})
-        await message.answer(f"Added quick reply {len(quick_replies)}.")
+        await message.answer(render("quick_reply_added", number=len(quick_replies)))
     elif action == "remove" and len(parts) == 3 and parts[2].isdigit():
         index = int(parts[2]) - 1
         if index < 0 or index >= len(quick_replies):
-            await message.answer("Quick reply number not found.")
+            await message.answer(render("quick_reply_missing"))
             return
         quick_replies.pop(index)
         await db.settings.update_one({"_id": "bot"}, {"$set": {"quick_replies": quick_replies}})
-        await message.answer("Quick reply removed.")
+        await message.answer(render("quick_reply_removed"))
     else:
-        await message.answer("Usage: /quickreplies [list|add TEXT|remove NUMBER]")
+        await message.answer(render("quick_replies_usage"))
 
 
 @router.message(Command("broadcast"))
@@ -914,7 +954,7 @@ async def broadcast_command(message: Message, state: FSMContext) -> None:
     if not await require_admin(message, "broadcast"):
         return
     await state.set_state(BroadcastFlow.waiting_message)
-    await message.answer("Send the message or media to broadcast. It will be previewed before delivery; /cancel aborts.")
+    await message.answer(render("broadcast_prompt"))
 
 
 @router.message(BroadcastFlow.waiting_message)
@@ -929,7 +969,7 @@ async def broadcast_preview(message: Message, state: FSMContext) -> None:
             InlineKeyboardButton(text="Cancel", callback_data="broadcast:cancel"),
         ]]
     )
-    await message.answer("Confirm this broadcast?", reply_markup=markup)
+    await message.answer(render("broadcast_confirm_prompt"), reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("broadcast:"))
@@ -939,7 +979,7 @@ async def broadcast_callback(callback: CallbackQuery, state: FSMContext) -> None
     action = callback.data.split(":", 1)[1]
     if action == "cancel":
         await state.clear()
-        await callback.message.edit_text("Broadcast cancelled.")
+        await callback.message.edit_text(render("broadcast_cancelled"))
     else:
         data = await state.get_data()
         await state.clear()
@@ -953,11 +993,11 @@ async def ticket_reply_callback(callback: CallbackQuery, state: FSMContext) -> N
         return
     ticket_id = callback.data.rsplit(":", 1)[1]
     if not await db.tickets.find_one({"ticket_id": ticket_id}):
-        await callback.answer("Ticket not found", show_alert=True)
+        await callback.answer(render("ticket_not_found"), show_alert=True)
         return
     await state.set_state(ReplyFlow.waiting_message)
     await state.update_data(ticket_id=ticket_id)
-    await callback.message.answer(f"Send your reply for {ticket_id}. Text and media are supported.")
+    await callback.message.answer(render("ticket_reply_prompt", ticket_id=ticket_id))
     await callback.answer()
 
 
@@ -968,9 +1008,9 @@ async def ticket_history_callback(callback: CallbackQuery) -> None:
     ticket_id = callback.data.rsplit(":", 1)[1]
     ticket = await db.tickets.find_one({"ticket_id": ticket_id})
     if not ticket:
-        await callback.answer("Ticket not found", show_alert=True)
+        await callback.answer(render("ticket_not_found"), show_alert=True)
         return
-    await callback.answer("Loading history")
+    await callback.answer(render("history_loading"))
     for entry in ticket.get("history", []):
         if entry.get("direction") == "user":
             source_chat_id = entry.get("chat_id")
@@ -982,7 +1022,7 @@ async def ticket_history_callback(callback: CallbackQuery) -> None:
             try:
                 await bot.copy_message(callback.from_user.id, source_chat_id, source_message_id)
             except (TelegramForbiddenError, TelegramBadRequest):
-                await callback.message.answer("Could not load one item from ticket history.")
+                await callback.message.answer(render("history_item_unavailable"))
 
 
 @router.callback_query(F.data.startswith("ticket:quick:"))
@@ -992,12 +1032,12 @@ async def quick_reply_menu_callback(callback: CallbackQuery) -> None:
     ticket_id = callback.data.rsplit(":", 1)[1]
     ticket = await db.tickets.find_one({"ticket_id": ticket_id})
     if not ticket:
-        await callback.answer("Ticket not found", show_alert=True)
+        await callback.answer(render("ticket_not_found"), show_alert=True)
         return
     settings = await db.settings.find_one({"_id": "bot"}) or {}
     quick_replies = settings.get("quick_replies", [])
     if not quick_replies:
-        await callback.answer("No quick replies configured", show_alert=True)
+        await callback.answer(render("quick_reply_not_configured"), show_alert=True)
         return
     markup = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1005,7 +1045,7 @@ async def quick_reply_menu_callback(callback: CallbackQuery) -> None:
             for index, text in enumerate(quick_replies)
         ]
     )
-    await callback.message.answer(f"Quick replies for {ticket_id}:", reply_markup=markup)
+    await callback.message.answer(render("quick_reply_for_ticket", ticket_id=ticket_id), reply_markup=markup)
     await callback.answer()
 
 
@@ -1019,7 +1059,7 @@ async def quick_reply_callback(callback: CallbackQuery) -> None:
     quick_replies = settings.get("quick_replies", [])
     index = int(index_text)
     if not ticket or index >= len(quick_replies):
-        await callback.answer("Ticket or quick reply not found", show_alert=True)
+        await callback.answer(render("quick_reply_selection_missing"), show_alert=True)
         return
     text = quick_replies[index]
     sent = await bot.send_message(ticket["user_id"], text)
@@ -1034,8 +1074,8 @@ async def quick_reply_callback(callback: CallbackQuery) -> None:
         "text",
         None,
     )
-    await callback.answer("Reply sent")
-    await callback.message.answer(f"Quick reply sent to {ticket_id}.")
+    await callback.answer(render("quick_reply_sent"))
+    await callback.message.answer(render("quick_reply_sent_to_ticket", ticket_id=ticket_id))
 
 
 @router.callback_query(F.data.startswith("ticket:status:"))
@@ -1044,14 +1084,17 @@ async def ticket_status_callback(callback: CallbackQuery) -> None:
         return
     _, _, ticket_id, status = callback.data.split(":", 3)
     if status not in {"open", "pending", "resolved"}:
-        await callback.answer("Invalid ticket status", show_alert=True)
+        await callback.answer(render("invalid_ticket_status"), show_alert=True)
         return
     ticket = await db.set_ticket_status(ticket_id, status)
     if not ticket:
-        await callback.answer("Ticket not found", show_alert=True)
+        await callback.answer(render("ticket_not_found"), show_alert=True)
         return
-    await callback.message.edit_text(f"Ticket {ticket_id} | {status.replace('_', ' ')}", reply_markup=ticket_actions(ticket_id))
-    await callback.answer("Status updated")
+    await callback.message.edit_text(
+        render("ticket_status", ticket_id=ticket_id, status=status.replace("_", " ")),
+        reply_markup=ticket_actions(ticket_id),
+    )
+    await callback.answer(render("status_updated"))
 
 
 @router.callback_query(F.data.startswith("dashboard:"))
@@ -1063,8 +1106,14 @@ async def dashboard_callback(callback: CallbackQuery, state: FSMContext) -> None
         stats = await db.statistics()
         tickets = stats["tickets"]
         await callback.message.answer(
-            f"Users: {stats['users']} ({stats['active_users']} active)\nTickets: {tickets['tickets']}\n"
-            f"Queries: {tickets.get('queries', 0)} | Replies: {tickets.get('responses', 0)}"
+            render(
+                "stats_dashboard",
+                users=stats["users"],
+                active_users=stats["active_users"],
+                tickets=tickets["tickets"],
+                queries=tickets.get("queries", 0),
+                responses=tickets.get("responses", 0),
+            )
         )
     elif len(action) > 1 and action[1] == "users":
         if not await require_callback_admin(callback, "users"):
@@ -1075,22 +1124,28 @@ async def dashboard_callback(callback: CallbackQuery, state: FSMContext) -> None
             return
         tickets = await db.tickets.find({"status": {"$in": ["open", "pending"]}}).sort("updated_at", -1).limit(10).to_list(length=10)
         if not tickets:
-            await callback.message.answer("No open tickets.")
+            await callback.message.answer(render("open_tickets_empty"))
         for ticket in tickets:
             await callback.message.answer(
-                f"{ticket['ticket_id']} | user {ticket['user_id']} | {ticket['status']} | {ticket['query_count']} messages",
+                render(
+                    "ticket_list_entry",
+                    ticket_id=ticket["ticket_id"],
+                    user_id=ticket["user_id"],
+                    status=ticket["status"],
+                    messages=ticket["query_count"],
+                ),
                 reply_markup=ticket_actions(ticket["ticket_id"]),
             )
     elif len(action) > 1 and action[1] == "broadcast":
         if not await require_callback_admin(callback, "broadcast"):
             return
         await state.set_state(BroadcastFlow.waiting_message)
-        await callback.message.answer("Send the message or media to broadcast. It will be previewed before delivery.")
+        await callback.message.answer(render("broadcast_dashboard_prompt"))
     elif len(action) > 1 and action[1] == "search":
         if not await require_callback_admin(callback, "tickets"):
             return
         await state.set_state(SearchFlow.waiting_query)
-        await callback.message.answer("Send a Telegram ID, username, ticket ID, or search term.")
+        await callback.message.answer(render("search_prompt"))
     await callback.answer()
 
 
@@ -1105,7 +1160,7 @@ async def support_maintenance_worker() -> None:
                 try:
                     await bot.send_message(
                         topic["support_group_id"],
-                        f"Reminder: conversation {topic['user_id']} is still awaiting an admin reply.",
+                        reminder_caption(topic["user_id"]),
                         message_thread_id=topic["thread_id"],
                     )
                 except (TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError, TelegramServerError) as error:
