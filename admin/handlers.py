@@ -25,6 +25,7 @@ from database import utcnow
 from keyboards import (
     admin_dashboard,
     priority_options,
+    setup_support_group_button,
     ticket_actions,
     topic_actions,
     transfer_admins,
@@ -95,6 +96,10 @@ class AdminHandlers:
             and not (message.text and message.text.startswith("/")),
         )
         self.group_router.callback_query.register(self.inbox_action_callback, F.data.startswith("inbox:"))
+        self.group_router.callback_query.register(
+            self.setup_support_group_callback,
+            F.data == "setup:confirm",
+        )
 
     async def admin_permissions(self, admin_id: int) -> set[str]:
         admin = await self.db.admins.find_one({"admin_id": admin_id})
@@ -156,25 +161,43 @@ class AdminHandlers:
         )
         await status_message.edit_text(render("broadcast_confirmed", delivered=delivered, failed=failed))
 
-    async def setup_support_group(self, message: Message) -> None:
-        permissions = await self.admin_permissions(message.from_user.id)
+    async def support_group_setup_error(self, group_id: int, owner_id: int) -> str | None:
+        permissions = await self.admin_permissions(owner_id)
         if "*" not in permissions and "admin_management" not in permissions:
-            await message.answer(render("setup_owner_only"))
-            return
-        chat = await self.bot.get_chat(message.chat.id)
+            return render("setup_owner_only")
+        chat = await self.bot.get_chat(group_id)
         if not chat.is_forum:
-            await message.answer(render("setup_topics_required"))
-            return
+            return render("setup_topics_required")
         bot_user = await self.bot.get_me()
-        bot_member = await self.bot.get_chat_member(message.chat.id, bot_user.id)
+        bot_member = await self.bot.get_chat_member(group_id, bot_user.id)
         if bot_member.status != "administrator" or not getattr(bot_member, "can_manage_topics", False):
-            await message.answer(render("setup_bot_permissions"))
+            return render("setup_bot_permissions")
+        return None
+
+    async def setup_support_group(self, message: Message) -> None:
+        issue = await self.support_group_setup_error(message.chat.id, message.from_user.id)
+        if issue:
+            await message.answer(issue)
             return
-        await self.db.set_support_group(message.chat.id, chat.title or "Support Inbox")
-        await self.db.log_support_event(
-            "support_group_setup", group_id=message.chat.id, owner_id=message.from_user.id
+        await message.answer(
+            render("setup_confirm_prompt"),
+            reply_markup=setup_support_group_button(),
         )
-        await message.answer(render("setup_complete"))
+
+    async def setup_support_group_callback(self, callback: CallbackQuery) -> None:
+        issue = await self.support_group_setup_error(callback.message.chat.id, callback.from_user.id)
+        if issue:
+            await callback.answer(issue, show_alert=True)
+            return
+        chat = await self.bot.get_chat(callback.message.chat.id)
+        await self.db.set_support_group(callback.message.chat.id, chat.title or "Support Inbox")
+        await self.db.log_support_event(
+            "support_group_setup",
+            group_id=callback.message.chat.id,
+            owner_id=callback.from_user.id,
+        )
+        await callback.message.edit_text(render("setup_complete"), reply_markup=None)
+        await callback.answer()
 
     async def route_admin_topic_message(self, message: Message) -> None:
         group_id = await self.db.get_support_group_id()

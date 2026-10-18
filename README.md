@@ -15,7 +15,7 @@ Telegram support bot with a MongoDB-backed supergroup inbox. Each user has a per
 2. Install dependencies with `python -m pip install -r requirements.txt`.
 3. Start MongoDB, then run `python bot.py`.
 4. Add the bot to the support supergroup as an administrator with Manage Topics permission. Enable Topics if needed.
-5. An authorized owner runs `/setup` in the supergroup.
+5. An authorized owner runs `/setup` in the supergroup and confirms with **Use this group**. The selected group is saved in MongoDB.
 6. Open the bot in Telegram and send `/start`, then select Contact Admin.
 
 Bootstrap admins have all permissions and can manage other admins using `/admins add TELEGRAM_ID [reply,tickets,users,broadcast,stats]` and `/admins remove TELEGRAM_ID`. Authorized admins must also be members of the support supergroup to reply in topics. As a group administrator, the bot receives topic messages regardless of privacy mode.
@@ -40,4 +40,4 @@ Topic buttons let authorized admins claim, transfer, prioritize, mute reminders,
 - `/admins [list|add TELEGRAM_ID [permissions]|remove TELEGRAM_ID]` manages admins.
 - `/quickreplies [list|add TEXT|remove NUMBER]` manages reusable responses, shown from a ticket's Quick reply button.
 
-Permission names are `reply`, `tickets`, `users`, `broadcast`, `stats`, and `admin_management`. Broadcasts require confirmation and report delivered/failed counts. MongoDB collections `support_topics`, `support_messages`, and `support_logs` store topic mappings, mirrored Telegram message IDs/media metadata, and operational events. Set `MONGODB_URI`, `MONGODB_DATABASE`, `BOT_NAME`, and optional `SUPPORT_GROUP_ID` in `.env` to customize the deployment. Keep the bot worker running continuously for routing and reminders.
+Permission names are `reply`, `tickets`, `users`, `broadcast`, `stats`, and `admin_management`. Broadcasts require confirmation and report delivered/failed counts. MongoDB collections `support_topics`, `support_messages`, and `support_logs` store topic mappings, mirrored Telegram message IDs/media metadata, and operational events. Set `MONGODB_URI`, `MONGODB_DATABASE`, and `BOT_NAME` in `.env`; `/setup` saves the support group in MongoDB. Keep the bot worker running continuously for routing and reminders.

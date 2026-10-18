@@ -77,6 +77,8 @@ MESSAGES = {
     "setup_topics_required": "Enable Topics for this supergroup before running /setup.",
     "setup_bot_permissions": "Make the bot an administrator with Manage Topics permission, then run /setup again.",
     "setup_complete": "Support inbox configured. New user conversations will get their own topic here.",
+    "setup_confirm_prompt": "Use this supergroup as the support inbox?",
+    "setup_confirm_missing": "This setup button is no longer valid. Run /setup again.",
     "user_list_title": "Registered users:",
     "user_list_entry": "{user_id} | {name} | {username} | {status}",
     "ticket_summary": "Ticket {ticket_id} | user {user_id} | {status} | queries {queries} | replies {responses}",

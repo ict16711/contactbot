@@ -24,7 +24,6 @@ from config import (
     MONGODB_DATABASE,
     MONGODB_URI,
     REMINDER_INTERVAL_SECONDS,
-    SUPPORT_GROUP_ID,
 )
 from database import Database, utcnow
 from admin.handlers import create_admin_routers
@@ -426,8 +425,6 @@ async def main() -> None:
     db = Database(MONGODB_URI, MONGODB_DATABASE)
     await db.initialize(ADMIN_IDS, BOT_NAME)
     bot = Bot(BOT_TOKEN)
-    if SUPPORT_GROUP_ID:
-        await db.set_support_group(SUPPORT_GROUP_ID, "Configured support group")
     dispatcher = Dispatcher()
     admin_private_router, admin_group_router = create_admin_routers(
         db,

@@ -77,3 +77,11 @@ def priority_options(user_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Urgent", callback_data=f"inbox:setpriority:{user_id}:urgent")],
         ]
     )
+
+
+def setup_support_group_button() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Use this group", callback_data="setup:confirm")]
+        ]
+    )
